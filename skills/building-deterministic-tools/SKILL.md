@@ -63,7 +63,7 @@ from the source, not believed.
 3. Assess reuse: will the output feed later sessions, a redesign, or a
    verification against the source?
 4. Verdict: `build` if any of (large, high-stakes, reused). Otherwise `eyeball`.
-5. Record the verdict and the measured count — it seeds the Phase 3 gate's
+5. Record the verdict and the measured count — it seeds the Phase 4 gate's
    independent count.
 
 **Failure behavior:** when borderline, choose `build` if the stakes are
@@ -71,19 +71,43 @@ correctness; the tool is cheap, the missed detail is not.
 
 ---
 
-## Phase 2: Build the tool — deterministic and agent-friendly
+## Phase 2: Choose reusable vs throwaway
 
 **Entry:** Verdict is `build`.
 
-**Exit:** The tool parses the source once, exposes an overview that shows what
-it can answer, and answers each question through a retrieval path that returns
-a complete, untruncated element. Every element is reachable from the overview.
-Re-running produces byte-identical output.
+**Exit:** A lifecycle choice: `reusable` or `throwaway`, made against the single
+criterion below. This criterion is the only source of the reusable/throwaway
+rule — Phase 4 refers to the two paths without re-deriving the choice.
 
-**Steps:**
+**The lifecycle criterion:**
+
+- **Reusable** — the source shape is generic: markup, logs, exports, dumps —
+  the same kind recurs across sessions or sources. Choose this by default; the
+  build cost is paid once and reused.
+- **Throwaway** — the source shape is provably one-off: a specific input that
+  will never recur. Use the lean park-in-scratch path.
+- Choose `reusable` unless the one-off case is established. A reusable tool's
+  cost is paid once and reused; a throwaway tool's cost is paid every time the
+  shape recurs.
+
+**Failure behavior:** when the shape's recurrence is unclear, choose `reusable`
+— the persistence step is cheap, and re-parsing a recurring source is not.
+
+---
+
+## Phase 3: Build the tool — deterministic and agent-friendly
+
+**Entry:** Verdict is `build`; lifecycle is chosen.
+
+**Exit:** The tool parses the source once, exposes the fixed documentation core
+(overview, catalog, help), and answers each question through a retrieval path
+that returns a complete, untruncated element. Every element is reachable from
+the overview. Re-running produces byte-identical output.
+
+**Steps — parse and dump:**
 
 1. Parse with a real parser (`html.parser.HTMLParser`, `json`, `csv`, etc.) —
-   never hand-rolled string slicing.
+   hand-rolled string slicing is a miss risk, not a shortcut.
 2. Record **every** attribute and style key on every element; buffer raw
    embedded markup (e.g. full `<svg>` for icons) verbatim.
 3. Resolve identifiers by **name**, not by value. A token reference like
@@ -99,41 +123,63 @@ Re-running produces byte-identical output.
 7. Derive everything downstream — the overview and every answer — **from the
    raw dump**, never by re-parsing the source. A bug fix then re-derives in
    seconds and a re-run never touches the source a second time.
-8. **Design the interface for the consumer.** An agent can only use what it
-   can find and reach:
-   - An **overview** — cheap, small, answers "what is here and how many":
-     element counts, distinct keys, the names a query can target. The agent
-     reads the overview first; it must fit in one glance. It doubles as the
-     digest and later carries the verification receipt.
-   - A **retrieval path for every element type** — one question per call.
-     Querying one element returns that element complete: intact text, resolved
-     tokens, clean encoding — never summarized, never truncated.
-   - **No dead ends** — walk from the overview to any element by composing its
-     commands. What the overview names, a command can pull.
-   The exact command shape is the agent's call. The contract is: discoverable,
-   one question per call, complete answers, everything reachable.
-9. **Keep every call small.** Prefer many cheap, bounded invocations over one
-   that prints everything. Where a set is large, paginate or slice rather than
-   dump.
+
+**Steps — the fixed documentation core** (every tool has all three; this shape
+is what any agent can rely on):
+
+- `<tool> overview` — one-glance digest: counts, distinct keys, queryable
+  names, + verification receipt. The agent reads this first; it must fit in one
+  glance.
+- `<tool> catalog` — self-description: list of subcommands, each with
+  description, param schema (types/valid values/examples), and what it returns.
+  New agents learn the whole surface from the tool itself.
+- `<tool> help <subcommand>` — per-command detail.
+
+**Steps — scenario-built retrieval commands** (free-form, built per source, one
+command per element type / query pattern). Each follows MCP-inspired discipline,
+adapted for agents:
+
+- verb-first names, service-prefixed to avoid collisions
+- description answers *what / when-to-use / what-it-returns* (+ "when NOT to
+  use")
+- params documented with valid-value examples and format hints
+- errors that teach the fix (e.g. `date` must be ISO 8601, e.g. 2026-01-15; got
+  'next Thursday')
+- responses return complete-but-lean data (summaries + drill-down, pagination
+  with `has_more` / `total`)
+- one question per call; many cheap, bounded invocations over one that prints
+  everything; paginate or slice large sets rather than dump
+
+**The behavior contract:** reachable-or-loud, one question per call, no dead
+ends, byte-identical re-runs. What the overview names, a command can pull —
+walk from the overview to any element by composing its commands.
 
 **Failure behavior:** if a parse step throws, print the offending input to
 stderr and skip that file — never emit a partial tree as if it were complete.
 
 ---
 
-## Phase 3: Verify, then park the tool
+## Phase 4: Verify, then persist
 
 Verify by a route other than the one that produced the answer. The code path
 that emitted the output must never be the path that certifies it — a
-self-derived count only proves the tool agrees with itself. Four cheap checks,
-each with a distinct job:
+self-derived count only proves the tool agrees with itself.
 
 **Entry:** The tool answers through its interface.
 
-**Exit:** All four checks pass; the overview carries the receipt; the script is
-parked; the actual task resumes against the tool.
+**Exit:** The checklist below is fully checked; the tool is persisted along the
+Phase 2 path; the actual task resumes against the tool.
 
-**Steps:**
+**The verification checklist:**
+
+```
+☐ Re-run diff = zero delta
+☐ Independent element count = source count
+☐ 3+ spot-checks resolve by name
+☐ Reachability sweep: every cataloged element queryable
+☐ Tool has catalog + overview + help
+☐ Reusable tools have AGENTS.md pointer
+```
 
 1. **Re-run, diff — catches nondeterminism.** Run the tool unchanged and diff
    the raw output against the previous run. Any difference that no source
@@ -154,16 +200,38 @@ parked; the actual task resumes against the tool.
    classes; the independent count sizes them. For each class, confirm a
    retrieval path exists and return one sampled element complete. If a class
    has no path, the tool cannot be trusted to answer the task.
-5. Only when all four pass, append the receipt to the overview: `verified:
+5. **Documentation core — catches invisibility.** Confirm the tool answers
+   `overview`, `catalog`, and `help <subcommand>`; a tool that cannot describe
+   itself is invisible to later sessions.
+6. **Persistence — catches orphaned tools.** On the reusable path, confirm the
+   AGENTS.md pointer exists (name, location, invocation, what it answers,
+   trigger description). On the throwaway path, confirm the tool stays parked
+   and is discarded after use.
+7. Only when every item checks, append the receipt to the overview: `verified:
    idempotent, count = N, spot-check = 3/3`. Then consume the tool.
-6. Leave the script in `tools/` (or the scratch dir) — do not wire it into the
-   product, the build, or CI.
-7. Do not gold-plate: these checks *are* the test — no test files, no
-   committed fixtures, no generalization, no config surface. A fixture is just
-   input the extractor already handled, so it cannot catch what the extractor
-   cannot see.
-8. Resume the real task by querying the tool. Do not re-parse the raw source
-   by hand "to be sure" — that re-introduces the miss risk the tool removed.
+
+**Persist along the Phase 2 path:**
+
+- **Reusable:** persist under `skills/building-deterministic-tools/tools/<slug>/`
+  (CLI + dump + catalog). Register the tool in the repo's `AGENTS.md` — add one
+  entry under `## Built tools`:
+
+  ```markdown
+  - `<tool>` — `<location>` — invoke with `<command>` — answers `<what>` —
+    query when `<trigger description>`
+  ```
+
+  The **trigger description** tells later sessions when to query this tool
+  instead of re-parsing. The tool stays out of the product, the build, and CI.
+  The checks are the test — no test files, no committed fixtures, no
+  generalization, no config surface. A fixture is just input the extractor
+  already handled, so it cannot catch what the extractor cannot see.
+- **Throwaway:** park it in the scratch dir, keep it lean, discard after the
+  task completes.
+
+**Consume:** query the tool for every answer. Re-parsing the raw source by hand
+re-introduces the miss risk the tool removed; evidence comes from the tool, and
+the tool is verified.
 
 **Failure behavior:** never consume unverified output. Any red check means the
 tool is wrong, and the task must wait for the fix.
@@ -184,3 +252,7 @@ tool is wrong, and the task must wait for the fix.
 | "The counts matched, so nothing was dropped" | Counts cannot see per-element key loss. Spot-check a retrieval path; reachable or loud. |
 | "One command that prints everything is simpler" | A single fat call fills the context and buries the detail the task needs. Slice it into an overview plus targeted paths. |
 | "That element class doesn't need a path, the task won't ask" | Reachability is the contract. Every class the overview names must have a working path; the consumer decides what it asks for. |
+| "I'll skip the catalog, the overview says enough" | **Hard stop.** A tool without a catalog is invisible: new agents can't learn its surface. The catalog is the self-description; the overview is the digest. |
+| "That element class isn't reachable, but I can read it by hand" | **Hard stop.** Reachable or loud is the contract. If a class has no path, the tool is wrong — fix the tool, and the task waits. |
+| "This source might recur, but the throwaway path is faster" | Choose reusable unless the one-off case is established. A reusable tool's cost is paid once; re-parsing a recurring source is paid every time. |
+| "The tool is built and parked, that's enough" | A reusable tool that is parked and never registered in AGENTS.md is invisible to later sessions. Register the pointer; that is the persistence step. |
